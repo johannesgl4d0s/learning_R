@@ -1,0 +1,383 @@
+---
+title: "Wind data in R - Review of a peeled potato"
+author: "Johannes Misensky"
+date: "2023-01-22"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(bReeze)
+library(dplyr)
+library(ggplot2)
+library(reshape)
+library(lubridate)
+```
+
+## Einleitung
+
+Dieses Paper behandelt ein kritisches Review des R-Blog Artikels: "Wind data in R, part I: more than one way to peel a potato". 
+Quelle: [R-Wind](https://www.r-bloggers.com/2022/11/wind-data-in-r-part-i-more-than-one-way-to-peel-a-potato/)
+
+Sämtliche aus dem Artikel entnommenen Aussagen werden mit dem Vermerkt [Quelle: R-Wind] gekennzeichnet. 
+
+Im Verlauf wird auf die folgenden Punkte eingegangen: 
+
+1. Sind Annahmen und im Artikel verwendete Begriffe bzw. Daten korrekt?
+2. Gibt es eine Erklärung für die dargestellten Differenzen?
+
+
+# Wind data in R, part I: more than one way to peel a potato - Zusammenfassung
+
+
+Im Artikel werden zwei verschiedene Möglichkeiten nutzbare Windenergie zu berechnen gegenübergestellt. Der Autor nutzt dafür einerseits Daten von NASA POWER - einer Datenbank für weltweite meterologische Daten - und bReeze, ein r-package speziell für die Windkraftwerk berechnung entwickelt. [Quelle: R-Wind]
+Als Windkraftwerk wird das Model Enercon_E126_7 herangezogen. 
+
+```{r , echo= FALSE}
+pow_curve = bReeze::pc("Enercon_E126_7.5MW.pow")
+pow_curve_df = data.frame(cbind(pow_curve$v, pow_curve$P))
+colnames(pow_curve_df) = c("speed", "power")
+plot(pow_curve_df, main = "Leistungskurve Enercon_E126", xlab = "Windgeschwindikeit", ylab = 'Leistung')
+```
+
+
+zur Berechnung der nutzbaren Windenergie schlägt der Autor folgende 
+Funktion vor:
+
+
+```{r}
+
+calculate_wind_outputs <-function(windspeeds, measured_height, hub_height, power_curve, cutin_speed, cutout_speed, terrain)
+{
+  #First, we calculate what the wind speed would be at the hub height of the given turbine
+  #We can use a simple linear adjustment and just increase the speeds by the correct amount
+  
+  if(terrain == "onshore")
+  {
+    hellman_exponent = 1/7
+  }
+  
+  else if(terrain == "offshore")
+  {
+    hellman_exponent = 1/9
+  }
+  adjustment_factor = (hub_height/measured_height)^hellman_exponent
+  adjusted_wind_speeds = windspeeds*adjustment_factor
+  
+  #Let's create a vector which has the same length as the wind speeds
+  power_output = adjusted_wind_speeds
+  
+  for(i in 1:length(power_output))
+  {
+    if(adjusted_wind_speeds[i] > cutin_speed & adjusted_wind_speeds[i] < cutout_speed)
+    {
+      for(j in 1:nrow(power_curve))
+      {
+        #Just make sure that this is working
+        if(adjusted_wind_speeds[i] >= power_curve$speed[j] & adjusted_wind_speeds[i] < power_curve$speed[j+1])
+        {
+          #We want the power output to match the power curve so long as the wind speed is the same as or greater than
+          # the power curve's predicting variable and below the one above
+          power_output[i] = power_curve$power[j]
+        }
+      }
+    }
+    
+    #You get no power output if your wind speed is either below the cut-in or above the cut-out speed
+    else if(adjusted_wind_speeds[i] < cutin_speed | adjusted_wind_speeds[i] >= cutout_speed)
+    {
+      power_output[i] = 0 
+    }
+  }
+  
+  
+  #In keeping with good practice--a function should return only one variable
+  return(power_output)
+}
+```
+```{r, echo=FALSE}
+#The power coefficient of the wind is the ratio of 
+# wind power electricity to the power in the wind 
+area_of_turbine = pi*(0.5*127)^2
+wind_sppeds = pow_curve_df$speed
+density_of_air = 1.225
+
+#Keep in mind that the expression for kinetic energy was in J, not kWh
+#So we first multiply by 1/1000
+#Notice though that we are assuming both that the energy is constant
+#throughout the hour and therefore that the wind turbine keeps going 
+kinetic_energy_in_wind = 0.001*0.5*area_of_turbine*density_of_air*wind_sppeds^3
+power_coefficient = pow_curve_df$power/kinetic_energy_in_wind
+```
+[Quelle: R-Wind]
+
+die Funktion nimmt zwei Vereinfachungen an: 
+
+1. Der Wind weht in einer gegeben Zeiteinheit konstant
+2. Die Berechnung der Windstärke an der Hubhöhe
+
+Aus der NASA-DB werden Winddaten zwischen 2008-12-31 und 2010-01-01 entnommen
+
+```{r, echo=FALSE}
+hourly_wind_data = nasapower::get_power(community = "re", pars = c("WS10M", "WS50M"), temporal_api = "HOURLY", 
+                                        lonlat = c(11.1421496, 48.7716291), dates = c("2008-12-31", "2010-01-01"))
+head(hourly_wind_data)
+
+```
+[Quelle: R-Wind]
+Und anschließend ein "Capacity Faktor" berechnet. 
+
+
+```{r}
+
+#As usual, we want to make sure we have a dataframe, which is the easiest way to work with this kind of thing in R
+#The original data download is a tibble, with some metadata which we can discard here
+hourly_wind_data = data.frame(hourly_wind_data)
+
+#Put it through the works for the Enercon E-126
+#I'm going to use the windspeeds from the 50m hub height, for fun
+#Please note that as a decent member of the human race, I only use metric/SI units if at all possible
+hourly_wind_energy = calculate_wind_outputs(windspeeds = hourly_wind_data$WS50M, measured_height = 50, hub_height = 135, cutin_speed = 3, cutout_speed = 25, power_curve = pow_curve_df, terrain = "onshore")
+#What kind of capacity factor does this give us?
+#Convert to MWh
+#Then take into account that the total possible energy generated is 7.5 MW * 8760 hours in a year
+capacity_factor_rough = 0.001*sum(hourly_wind_energy)/(7.5*8760)
+
+
+```
+[Quelle: R-Wind]
+
+```{r, echo=FALSE}
+
+print(paste0("Der Brechnete Kapazitätsfaktor beträgt: ", capacity_factor_rough))
+```
+
+
+Für das bReeze Package wird eine ähnliche vorgangweise gewählt und ein Faktor rechnet:
+
+```{r, echo=FALSE}
+#How to calculate it in bReeze
+#We already did this using our manual method but we will leave out the re-naming of the columns
+# and the conversion to a DF--bReeze uses these objects as they are
+pow_curve = bReeze::pc("Enercon_E126_7.5MW.pow")
+#Let's also get the wind speed data which is bunlded with bReeze
+data("winddata", package = "bReeze")
+data_from_breeze = winddata
+
+
+#You can see that we are keeping that hub height and power curve from last time
+# but we also now need to create a wind profile, shown below
+
+#Our first sub-task is going to be to extract the wind speeds and standard deviations measured at 40 m
+measured_40_speed = data_from_breeze$v1_40m_avg
+measured_40_std = data_from_breeze$v1_40m_std
+direction_from_breeze_set = data_from_breeze$dir1_40m_avg
+#We combine the average wind speed, standard deviation of that wind speed and
+# its direction into a "set"
+set40m = bReeze::set(height = 40, v.avg = measured_40_speed, v.std = measured_40_std, dir.avg = direction_from_breeze_set)
+#The next thing to do is to build a "mast" object, which combines a set of wind data
+# together with timestamps
+#Note that for this to work, we need to format the timestampes correctly
+#For the sake of completeness, I am going to give the timestaps a CET timezone
+timestamp_from_breeze = bReeze::timestamp(data_from_breeze$date_time, tz = "CET")
+mast_for_breeze = bReeze::mast(timestamp = timestamp_from_breeze, set40m)
+#So now we have a mast object which ties together a set of wind speed data to date time elements
+# We build a "wind profile" which is correctly formatted to use with our function in bReeze
+our_wind_profile = bReeze::windprofile(mast = mast_for_breeze, v.set = 1, dir.set = 1)
+#Note that I have chosen to use the first (and only) wind speed and direction sets
+#Now let's go back to our earlier line of code
+annual_energy_from_breeze = bReeze::aep(profile = our_wind_profile, hub.h = 135, pc = pow_curve)
+#We can now access the capacity factor--18%
+
+print(paste0("Der Brechnete Kapazitätsfaktor beträgt: ", annual_energy_from_breeze$capacity))
+```
+[Quelle: R-Wind]
+
+Wie sich zeigt gibt es einen Unterschied zwischen den beiden Berechnungen von 1%. 
+
+## 1. Sind Annahmen und verwendete Begriffe bzw. Daten korrekt? 
+
+
+Die in der Funktion calculate_wind_outputs vorgenommenen Annahmen werden korrekt dargestellt und werden in der Praxis ähnlich gehandhabt. 
+
+Der Begriff Kapazitätsfaktor wird korrekt verwendet. Wenn man die Formel
+  
+    0.001*sum(hourly_wind_energy)/(7.5*8760)
+
+betrachtet wird schnell klar das nicht hier der Wirkungsgrad (in englisch efficiency) errechnet wird. 
+
+Ein Kapazitätsfaktor einer Windkraftanlage ist ein Maß für die Auslastung einer Windkraftanlage. Er beschreibt die durchschnittliche Leistungsabgabe der Anlage über einen definierten Zeitraum im Verhältnis zu der maximal möglichen Leistungsabgabe der Anlage. Für die maximal mögliche Leistungsabgabe wird dabei unterstellt, dass die Anlage über den definierten Zeitraum mit der angegebenen Nennleistung der Windkraftanlage betrieben wird. Quelle: [Emargus](https://www.enargus.de/pub/bscw.cgi/d5621-2/*/*/Kapazit%c3%a4tsfaktor%20einer%20Windkraftanlage.html?op=Wiki.getwiki)
+
+Anders ist es aber wenn man die verwendeten Daten näher betrachtet. 
+
+# In welchem Zeitraum werden die bReeze Winddaten bereitgestellt? 
+
+
+```{r, echo=FALSE}
+print(paste0("Die zu Verfügung gestellten Daten beginnen zu folgendem Zeitpunkt: ",head(data_from_breeze$date_time, n = 1)))
+      
+print(paste0("Und enden mit: ",tail(data_from_breeze$date_time, n = 1)))
+```
+
+```{r}
+date_1 = as.Date("2009-05-06")
+date_2 = as.Date("2010-01-31")
+
+diff_days = as.numeric(difftime(date_2,date_1, units = "days"))
+print(paste0("Es werden: ",diff_days, " Tage erfasst"))
+```
+Wie bereits weiter oben erwähnt werden für die vorgestellte Funktion ein Zeitraum von 365 Tage herangezogen. 
+
+Hier ergibt sich also schon ein erster Unterschied da das Windpotentzial wahrscheinlich nicht gleichmäßig über das Jahr verteilt ist.
+
+# Wie ist das Windpotenzial übers Jahr gesehen verteilt? 
+
+```{r, echo=FALSE}
+plot(hourly_wind_data$WS50M, type = "l", xlab = "Stunden des Jahres", ylab = "Windstärke", main = 'Windstärke in 50m Höhe')
+```
+
+Vermutung: die windstärksten Monate liegen im ersten und letzten Quartal des Jahres
+
+```{r}
+# Erzeuge einenen Dataframe mit den Monatsmittelwerten
+month_data = hourly_wind_data %>% group_by(MO) %>% 
+  summarise(Mean_month=mean(WS50M),
+            .groups = 'drop') %>% as.data.frame()
+
+#Plote einen Barplot mit den Monatsmittelwerten
+data_bar = month_data$Mean_month
+names(data_bar) = month_data$MO
+barplot(data_bar, main = 'Mittlere Monatliche Windgeschwindigkeit', 
+        xlab = 'Monate', ylab = 'Windgeschwindigkeit [m/s]')
+```
+
+Die Vermutung scheint korrekt zu sein. Das ergibt folgendes Problem:
+der Dataframe "winddata" liefert 10 Minuten Daten im Zeitraum Mai (5) 
+und 31. Jänner das heißt um den Kapazitätsfaktor korrekt zu vergleichen muss der gleiche Zeitraum herangezogen werden. 
+
+```{r}
+hourly_wind_data_jm = nasapower::get_power(community = "re", pars = c("WS10M", "WS50M"), temporal_api = "HOURLY", 
+                                        lonlat = c(11.1421496, 48.7716291), dates = c("2009-05-06", "2010-01-31")) # neuer Zeithorizont 
+# 8760 Std entsprechen einen Jahr => neuer Stundensatz zwischen Mai und Jänner müssen gefunden werden
+std_ofyear = diff_days * 24
+
+# wie oben ist der orginale Df ein tribble
+
+hourly_wind_data_jm = data.frame(hourly_wind_data_jm)
+
+#mit einer Enercon E-126 Windkraftwerk berechnet ergibt folgende Leistung: 
+
+hourly_wind_energy_jm = calculate_wind_outputs(windspeeds = hourly_wind_data_jm$WS50M, measured_height = 50, hub_height = 135, cutin_speed = 3, cutout_speed = 25, power_curve = pow_curve_df, terrain = "onshore")
+plot(hourly_wind_energy_jm, type = 'l', xlab = 'Stunden des Jahres', ylab = 'Leistung', main = "Windstärke 50m - Neuer Zeitraum")
+
+
+capacity_factor_rough_jm = 0.001*sum(hourly_wind_energy_jm)/(7.5*std_ofyear)
+```
+
+Wie sehen die Kapazitätsfaktoren jetzt aus? 
+
+```{r, echo=FALSE}
+
+print(paste0("NASA-DB Kap. Faktor im Zeitraum Mai - Jänner beträgt: ", round(capacity_factor_rough_jm*100, digits = 1), "%"))
+print(paste0("NASA-DB Kap. Faktor im Jahreszeitraum beträgt: ",  round(capacity_factor_rough*100, digits = 1), "%"))
+print(paste0("bReeze Kap. Faktor im Zeitraum Mai - Jänner beträgt: ", annual_energy_from_breeze$capacity*100, "%"))
+
+
+```
+
+Der Abstand zwischen den Kapazitätsfaktoren wird, wenig überraschend, größer und nicht kleiner.
+
+# 2. Gibt es eine Erklärung für die dargestellten Differenzen?
+
+Vermutung: die Differenz könnte in der unterschiedlichen Berechnung der Outputs liegen. 
+
+Das heißt der bReez Datensatz wird mit der Funktion calculate_wind_outputs verschnitten
+
+Dafür muss der Dataframe winddata aufbereitet werden
+
+```{r}
+#Was für ein Format ist date_time
+class(winddata$date_time)
+```
+
+```{r}
+#Ändere das Format zu datetime : 
+winddata$date_time = as_datetime(winddata$date_time,format =  "%d.%m.%Y %H")
+
+# Gruppieren zu Stunden Daten
+hourly_data = winddata %>% group_by(date_time) %>% 
+  summarise(Mean_hour=mean(v1_40m_avg),
+            .groups = 'drop') %>% as.data.frame()
+hourly_wind_energy_jm2 = calculate_wind_outputs(windspeeds = hourly_data$Mean_hour, measured_height = 40, hub_height = 135, cutin_speed = 3, cutout_speed = 25, power_curve = pow_curve_df, terrain = "onshore")
+capacity_factor_rough_jm2 = 0.001*sum(hourly_wind_energy_jm2)/(7.5*length(hourly_data$Mean_hour))
+```
+
+```{r, echo=FALSE}
+print(paste0("bReeze Kap. Faktor berechnet mit der Funktion calculate_wind_outputs beträgt: ", round(capacity_factor_rough_jm2*100, digits =1), "%"))
+```
+
+Die Berechnung zeigt, dass die Differenz des Kap. Faktors noch größer wird. Ein Grund dafür ist wahrscheinlich die Gruppierung auf Stundendaten mit gemittelten Windstärken. 
+
+Andererseits kann auch der potenzielle Energieinhalt des Windes in den Datensätzen unterschiedlich sein. 
+
+# Überprüfung des Energieinhalt
+
+```{r}
+
+data_line = data.frame(hour = seq(1:6093), nasa_data = hourly_wind_energy_jm[1:6093],bReeze_data = hourly_wind_energy_jm2)
+Molten <- melt(data_line, id.vars = "hour")
+ggplot(Molten, aes(x = hour, y = value, colour = variable)) + geom_line() +ggtitle("genutzte Windenegie zwischen den Datensätzen NASA und bReez") +
+  xlab("Stunden des Jahres") + ylab("Energie [kWh]")
+```
+
+```{r, echo=FALSE}
+print(paste0("Die genütze Windenergie im NASA Datensatz beträgt: ", sum(hourly_wind_energy_jm[1:6093])/1000, " MWh"))
+print(paste0("Die genütze Windenergie im bReeze Datensatz beträgt: ", sum(hourly_wind_energy_jm2)/1000, " MWh"))
+Diff_proz = sum(hourly_wind_energy_jm2)/sum(hourly_wind_energy_jm[1:6093])
+
+
+print(paste0("Das bedeutet eine Abweichung von ",round((1-Diff_proz)*100, digits = 1), "%"))
+
+```
+
+Iin Summe weisen die bReeze Daten, berechnet durch die Funktion, 12% weniger genutzen Wind aus.
+. 
+#Liegt das an einem Umrechnungsfaktor in der Funktion oder an den Windenergiedaten?
+
+```{r}
+data_line_wd = data.frame(hour = seq(1:6093), nasa_data = hourly_wind_data_jm$WS50M[1:6093],bReeze_data = hourly_data$Mean_hour)
+Molten <- melt(data_line_wd, id.vars = "hour")
+ggplot(Molten, aes(x = hour, y = value, colour = variable)) + geom_line()  +ggtitle("potenzielle Windenegie zwischen den Datensätzen NASA und bReez") +
+  xlab("Stunden des Jahres") + ylab("Energie [kWh]")
+```
+
+
+```{r, echo=FALSE}
+summary(data_line_wd[2:3])
+```
+Vermutung: Die NASA Daten sind geglätteter:
+
+```{r, echo=FALSE}
+hist(hourly_wind_data_jm$WS50M[1:6093], main = "Histogramm der NASA Daten", xlab = "potenzielle Wind Energie")
+```
+```{r, echo=FALSE}
+hist(hourly_data$Mean_hour, main = "Histogramm der bReeze Daten", xlab = "potenzielle Wind Energie")
+```
+
+Die NASA Daten könnten normal verteilt sein. 
+
+
+```{r, echo=FALSE}
+
+print(paste0("Die potenzielle Windenergie im NASA Datensatz beträgt: ", sum(hourly_wind_data_jm$WS50M[1:6093])/1000, " MWh"))
+print(paste0("Die potenzielle Windenergie im bReeze Datensatz beträgt: ", sum(hourly_data$Mean_hour)/1000, " MWh"))
+
+diff_windpower = sum(hourly_data$Mean_hour)/sum(hourly_wind_data_jm$WS50M[1:6093])
+
+print(paste0("Das bedeutet eine Abweichung von ",round((1-diff_windpower)*100, digits = 1), "%"))
+```
+
+Der unterschied zwischen den potenziellen Windenergien ist größer als nach der Umrechnung in elektrische Leistung  
+Es ist möglich das diese Verschiebung durch die Hellmankonstante, in der Funktion, auftritt 
+
+Grundsätzlich ist der Unterschied in den Kap. Faktoren allerdings in den Basis Daten zu finden. 
